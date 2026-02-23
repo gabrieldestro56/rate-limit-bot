@@ -42,6 +42,7 @@ const config = {
   logChannels: new Map(), // guildId => channelId
   maxSlowmodes: new Map(), // guildId:channelId => max_slowmode_seconds
   slowmodeDecay: new Map(), // guildId:channelId => decay_seconds
+  scamBusterChannels: new Map(), // guildId => Set(channelId)
 };
 
 // Persistent config helpers
@@ -60,6 +61,12 @@ function loadConfig() {
       config.logChannels = new Map(Object.entries(data.logChannels || {}));
       config.maxSlowmodes = new Map(Object.entries(data.maxSlowmodes || {}));
       config.slowmodeDecay = new Map(Object.entries(data.slowmodeDecay || {}));
+      config.scamBusterChannels = new Map(
+        Object.entries(data.scamBusterChannels || {}).map(([guildId, arr]) => [
+          guildId,
+          new Set(arr),
+        ])
+      );
     } catch (e) {
       console.error("Failed to load config:", e);
     }
@@ -77,6 +84,12 @@ function saveConfig() {
     logChannels: Object.fromEntries(config.logChannels),
     maxSlowmodes: Object.fromEntries(config.maxSlowmodes),
     slowmodeDecay: Object.fromEntries(config.slowmodeDecay),
+    scamBusterChannels: Object.fromEntries(
+      Array.from(config.scamBusterChannels.entries()).map(([guildId, set]) => [
+        guildId,
+        Array.from(set),
+      ])
+    ),
   };
   fs.writeFileSync(SAVE_FILE, JSON.stringify(data, null, 2));
 }
@@ -185,6 +198,24 @@ commands.push(
   new SlashCommandBuilder()
     .setName("help")
     .setDescription("List all commands and their usage.")
+    .toJSON()
+);
+commands.push(
+  new SlashCommandBuilder()
+    .setName("scam-buster")
+    .setDescription("Enable or disable Scam Buster for a channel (only admins can post when enabled).")
+    .addChannelOption((option) =>
+      option
+        .setName("channel")
+        .setDescription("Channel to monitor")
+        .setRequired(true)
+    )
+    .addBooleanOption((option) =>
+      option
+        .setName("enabled")
+        .setDescription("True to enable, False to disable")
+        .setRequired(true)
+    )
     .toJSON()
 );
 
@@ -582,6 +613,116 @@ client.commands.set("get-started", {
   },
 });
 
+async function sendScamBusterLog(guild, embed) {
+  const logChannelId = config.logChannels.get(guild.id);
+  if (!logChannelId) return;
+  const logChannel = guild.channels.cache.get(logChannelId);
+  if (logChannel && logChannel.type === ChannelType.GuildText) {
+    await logChannel.send({ embeds: [embed] }).catch(() => {});
+  }
+}
+
+client.commands.set("scam-buster", {
+  execute: async (interaction) => {
+    if (!hasManageChannels(interaction)) {
+      return interaction.reply({
+        embeds: [
+          makeEmbed({
+            title: "Permission Denied",
+            description:
+              "You need the **Manage Channels** permission to use this command.",
+            color: 0xed4245,
+            emoji: "⛔",
+          }),
+        ],
+        flags: 1 << 6,
+      });
+    }
+    const channel = interaction.options.getChannel("channel");
+    const enabled = interaction.options.getBoolean("enabled");
+    if (channel.type !== ChannelType.GuildText) {
+      return interaction.reply({
+        embeds: [
+          makeEmbed({
+            title: "Invalid Channel",
+            description: "Only text channels can be monitored by Scam Buster.",
+            color: 0xed4245,
+            emoji: "⚠️",
+          }),
+        ],
+        flags: 1 << 6,
+      });
+    }
+    const guildId = interaction.guildId;
+    if (!config.scamBusterChannels.has(guildId)) {
+      config.scamBusterChannels.set(guildId, new Set());
+    }
+    const set = config.scamBusterChannels.get(guildId);
+    if (enabled) {
+      set.add(channel.id);
+      saveConfig();
+      const logEmbed = makeEmbed({
+        title: "Scam Buster enabled",
+        description: `Scam Buster is now monitoring <#${channel.id}>. Only users with **Administrator** may post; others will be banned.`,
+        color: 0x57f287,
+        emoji: "🛡️",
+        fields: [
+          { name: "Channel", value: `<#${channel.id}>`, inline: true },
+          { name: "Enabled by", value: `<@${interaction.user.id}>`, inline: true },
+        ],
+      });
+      await sendScamBusterLog(interaction.guild, logEmbed);
+      await interaction.reply({
+        embeds: [
+          makeEmbed({
+            title: "Scam Buster enabled",
+            description: `Channel <#${channel.id}> is now protected. Only users with Administrator can post; others will be banned.`,
+            color: 0x57f287,
+            emoji: "🛡️",
+          }),
+        ],
+      });
+    } else {
+      if (!set.has(channel.id)) {
+        return interaction.reply({
+          embeds: [
+            makeEmbed({
+              title: "Not monitored",
+              description: `Channel <#${channel.id}> is not currently monitored by Scam Buster.`,
+              color: 0xed4245,
+              emoji: "⚠️",
+            }),
+          ],
+          flags: 1 << 6,
+        });
+      }
+      set.delete(channel.id);
+      saveConfig();
+      const logEmbed = makeEmbed({
+        title: "Scam Buster disabled",
+        description: `Scam Buster has been disabled for <#${channel.id}>.`,
+        color: 0xfee75c,
+        emoji: "🛡️",
+        fields: [
+          { name: "Channel", value: `<#${channel.id}>`, inline: true },
+          { name: "Disabled by", value: `<@${interaction.user.id}>`, inline: true },
+        ],
+      });
+      await sendScamBusterLog(interaction.guild, logEmbed);
+      await interaction.reply({
+        embeds: [
+          makeEmbed({
+            title: "Scam Buster disabled",
+            description: `Channel <#${channel.id}> is no longer monitored by Scam Buster.`,
+            color: 0x57f287,
+            emoji: "🛡️",
+          }),
+        ],
+      });
+    }
+  },
+});
+
 client.commands.set("help", {
   execute: async (interaction) => {
     const embed = makeEmbed({
@@ -621,6 +762,11 @@ client.commands.set("help", {
             "Set how many seconds of inactivity before slowmode drops by 5s (default: 20s).",
         },
         {
+          name: "/scam-buster channel enabled",
+          value:
+            "Enable or disable Scam Buster for a channel. When enabled, only users with Administrator can post; others are banned and logged.",
+        },
+        {
           name: "/get-started",
           value: "Get a quick explanation and setup guide for the bot.",
         },
@@ -642,6 +788,54 @@ const rateState = {};
 const slowmodeState = {};
 
 client.on("messageCreate", async (message) => {
+  // Scam Buster: in protected channels, only allow users with Administrator
+  if (
+    !message.author.bot &&
+    message.channel.type === ChannelType.GuildText &&
+    message.guild &&
+    config.scamBusterChannels.has(message.guildId) &&
+    config.scamBusterChannels.get(message.guildId).has(message.channel.id)
+  ) {
+    const hasAdmin = message.member?.permissions.has(
+      PermissionsBitField.Flags.Administrator
+    );
+    if (!hasAdmin) {
+      try {
+        await message.guild.members.ban(message.author.id, {
+          reason: "Scam Buster: unauthorized message in protected channel",
+        });
+        const contentSnippet = (message.content || "(no text content)").slice(
+          0,
+          3900
+        );
+        const logEmbed = makeEmbed({
+          title: "Scam Buster Ban",
+          description:
+            `User <@${message.author.id}> was banned for posting in a Scam Buster protected channel.\n\n**Message that triggered the ban:**\n\`\`\`\n${contentSnippet}\n\`\`\``,
+          color: 0xed4245,
+          emoji: "🔨",
+          fields: [
+            {
+              name: "User",
+              value: `${message.author.tag} (${message.author.id})`,
+              inline: true,
+            },
+            {
+              name: "Channel",
+              value: `<#${message.channel.id}>`,
+              inline: true,
+            },
+          ],
+          footer: "Scam Buster",
+        });
+        await sendScamBusterLog(message.guild, logEmbed);
+      } catch (e) {
+        console.error("Scam Buster ban failed:", e);
+      }
+      return;
+    }
+  }
+
   // Only monitor text channels, ignore bots, and only for supervised channels
   if (
     message.author.bot ||
@@ -801,7 +995,6 @@ setInterval(async () => {
 const GUILD_IDS = [
   "857689267744800800",
   "1326315584417435648",
-  "1171736729934381056",
   "766791173129502751",
   "1392172773111107594",
 ];
