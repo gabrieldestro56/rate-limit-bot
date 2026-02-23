@@ -800,37 +800,66 @@ client.on("messageCreate", async (message) => {
       PermissionsBitField.Flags.Administrator
     );
     if (!hasAdmin) {
+      const contentSnippet = (message.content || "(no text content)").slice(
+        0,
+        3900
+      );
+      const baseFields = [
+        {
+          name: "User",
+          value: `${message.author.tag} (${message.author.id})`,
+          inline: true,
+        },
+        {
+          name: "Channel",
+          value: `<#${message.channel.id}>`,
+          inline: true,
+        },
+      ];
+
+      let banSucceeded = false;
       try {
         await message.guild.members.ban(message.author.id, {
           reason: "Scam Buster: unauthorized message in protected channel",
+          deleteMessageSeconds: 86400, // delete their messages from last 1 day
         });
-        const contentSnippet = (message.content || "(no text content)").slice(
-          0,
-          3900
-        );
+        banSucceeded = true;
+      } catch (e) {
+        console.error("Scam Buster ban failed:", e);
+        const isMissingPerms = e.code === 50013;
+        const permNote = isMissingPerms
+          ? "Bot lacks **Ban Members** permission, or cannot ban this user (e.g. above bot in role hierarchy / server owner)."
+          : (e.message || String(e));
         const logEmbed = makeEmbed({
-          title: "Scam Buster Ban",
+          title: "Scam Buster — Ban failed",
           description:
-            `User <@${message.author.id}> was banned for posting in a Scam Buster protected channel.\n\n**Message that triggered the ban:**\n\`\`\`\n${contentSnippet}\n\`\`\``,
+            `Could not ban <@${message.author.id}> for posting in a Scam Buster protected channel.\n\n**Reason:** ${permNote}\n\n**Message that triggered the action:**\n\`\`\`\n${contentSnippet}\n\`\`\``,
           color: 0xed4245,
-          emoji: "🔨",
-          fields: [
-            {
-              name: "User",
-              value: `${message.author.tag} (${message.author.id})`,
-              inline: true,
-            },
-            {
-              name: "Channel",
-              value: `<#${message.channel.id}>`,
-              inline: true,
-            },
-          ],
+          emoji: "⚠️",
+          fields: baseFields,
           footer: "Scam Buster",
         });
         await sendScamBusterLog(message.guild, logEmbed);
-      } catch (e) {
-        console.error("Scam Buster ban failed:", e);
+        return;
+      }
+
+      if (banSucceeded) {
+        await new Promise((r) => setTimeout(r, 5000));
+        try {
+          await message.guild.members.unban(message.author.id, "Scam Buster: temporary ban ended");
+        } catch (e) {
+          console.error("Scam Buster unban failed:", e);
+        }
+        const logEmbed = makeEmbed({
+          title: "Scam Buster Ban",
+          description:
+            `User <@${message.author.id}> was temporarily banned (5s) and unbanned. Their messages from the last 1 day were deleted.\n\n**Message that triggered the action:**\n\`\`\`\n${contentSnippet}\n\`\`\``,
+          color: 0xed4245,
+          emoji: "🔨",
+          fields: baseFields,
+          footer: "Scam Buster",
+        });
+        await sendScamBusterLog(message.guild, logEmbed);
       }
       return;
     }
